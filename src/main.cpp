@@ -1,5 +1,8 @@
 ﻿#include <windows.h>
 #include "odbc.h"
+#include <iostream>
+#include <cstdint>
+#include <vector>
 
 // 여러 Row 읽기 처리
 class P_GAME_DAILY_ACHIEVEMENT_R : public IDataAccessObject
@@ -227,38 +230,42 @@ public:
 
 int main() 
 {	
-	// ODBC 매니저 초기화
+	// 1. ODBC 매니저 초기화
 	OdbcManager odbcManager;
 	odbcManager.Init("Driver={ODBC Driver 17 for SQL Server};Server=tcp:[ip],[port];Database=[dbtabase name];Uid=[id];Pwd=[pwd];language=english;ConnectRetryCount=0;", 10, 100);
 
 	auto connection = odbcManager.GetConnection();
 
-	// P_GAME_DAILY_ACHIEVEMENT_R 실행
-	int64_t usn = 1000121111200000002;
-	std::string datetime = "2022-03-23 12:12:12";
+	// 2. P_GAME_DAILY_ACHIEVEMENT_R 실행
+	{
+		int64_t usn = 1000121111200000002;
+		std::string datetime = "2022-03-23 12:12:12";
 
-	auto query = NamedQuery::CreateP_GAME_DAILY_ACHIEVEMENT_R();
-	query->SetParameter(usn, datetime);
-	
-	// 질의 정보를 등록
-	connection->BindQuery(query);
-	connection->Execute();
+		auto query = NamedQuery::CreateP_GAME_DAILY_ACHIEVEMENT_R();
+		query->SetParameter(usn, datetime);
 
-	// P_GAME_LoginData_MARS_RU 실행
-	uint8_t loginMode = 0;
-	int64_t usn = 0;
-	std::string pid = "OTEST2020";
-	int32_t serverID = 1001;
-	std::string serverTime = "2022-03-23 12:12:12";
-	std::string platform = "iOS";
-	std::string country = "Kr";
-	std::string languageCode = "Ko";
+		// 질의 정보를 등록
+		connection->BindQuery(query);
+		connection->Execute();
+	}
 
-	auto query = NamedQuery::CreateP_GAME_LoginData_MARS_RU();
-	query->SetParameter(loginMode, usn, pid, serverID, serverTime, platform, country, languageCode);
+	// 3. P_GAME_LoginData_MARS_RU 실행
+	{
+		uint8_t loginMode = 0;
+		int64_t usn = 0;
+		std::string pid = "OTEST2020";
+		int32_t serverID = 1001;
+		std::string serverTime = "2022-03-23 12:12:12";
+		std::string platform = "iOS";
+		std::string country = "Kr";
+		std::string languageCode = "Ko";
 
-	connection->BindQuery(query);
-	connection->Execute();
+		auto query = NamedQuery::CreateP_GAME_LoginData_MARS_RU();
+		query->SetParameter(loginMode, usn, pid, serverID, serverTime, platform, country, languageCode);
+
+		connection->BindQuery(query);
+		connection->Execute();
+	}
 	
 	// 반환
 	odbcManager.Release(connection);

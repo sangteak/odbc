@@ -1,16 +1,19 @@
 #pragma once
 
+#include <string>
+#include <deque>
+#include <memory>
+#include <sstream>
 #include <sql.h>
 #include <sqlext.h>
-#include <msodbcsql.h>
+#include "msodbcsql.h"
+
+#pragma comment(lib, "odbc32.lib")
+#pragma comment(lib, "odbccp32.lib")
 
 class OdbcError
 {
 public:
-	static constexpr char* CRITICAL_STATE_COMMUNICATION_LINK_FAILURE = "08S01";
-	static constexpr char* CRITICAL_STATE_PHYSICAL_CONNECTION_IS_NOT_USABLE = "08S02";
-	static constexpr char* CRITICAL_STATE_ETC = "HY000";
-
 	enum class eErrorLevel
 	{
 		NoError = 0,
@@ -88,9 +91,9 @@ public:
 private:
 	eErrorLevel JudgeErrorLevelAndGet()
 	{
-		if (0 == m_state.compare(CRITICAL_STATE_COMMUNICATION_LINK_FAILURE)
-			|| 0 == m_state.compare(CRITICAL_STATE_PHYSICAL_CONNECTION_IS_NOT_USABLE)
-			|| 0 == m_state.compare(CRITICAL_STATE_ETC))
+		if (0 == m_state.compare("08S01")		// communication link failure.
+			|| 0 == m_state.compare("08S02")	// Physical connection is not usable.
+			|| 0 == m_state.compare("HY000"))
 		{
 			return eErrorLevel::Critical;
 		}
@@ -109,7 +112,7 @@ using _odbc_error_ptr_t = std::shared_ptr<OdbcError>;
 class StatementException
 {
 public:
-	StatementException(_odbc_error_ptr_t& error)
+	StatementException(_odbc_error_ptr_t error)
 		: m_error(error)
 	{
 	}
@@ -251,7 +254,7 @@ public:
 		m_hStmt = hStmt;
 	}
 
-	inline void Close()
+	void Close()
 	{
 		m_index_read = 0;
 		m_index_param = 0;
@@ -265,7 +268,7 @@ public:
 		SQLFreeStmt(m_hStmt, SQL_CLOSE);
 	}
 
-	inline void Destroy()
+	void Destroy()
 	{
 		if (false == IsOpen())
 		{
@@ -539,8 +542,8 @@ public:
 private:
 	SQLHSTMT m_hStmt = SQL_NULL_HSTMT;
 	eFetchResult m_fetchResult;
-	int m_index_read = 0;
-	int m_index_param = 0;
+	SQLUSMALLINT m_index_read = 0;
+	SQLUSMALLINT m_index_param = 0;
 	int m_index_recordset = 0;
 };
 
@@ -592,8 +595,6 @@ public:
 	void SetParameter(Args... args)
 	{
 		m_parameters = std::make_tuple(args...);
-
-		std::cout << "tuple element size : " << std::tuple_size<std::tuple<Args...>>{} << std::endl;
 	}
 
 	virtual bool Build(Statement* statement) override
@@ -709,8 +710,6 @@ public:
 		if (SQL_SUCCESS != sqlResultCode)
 		{
 			auto errorObject = GetStatement().GetError();
-			std::cout << errorObject->ToString() << std::endl;
-
 			m_query->GetDao()->HandleOdbcException(errorObject);
 
 			return sqlResultCode;
@@ -721,8 +720,6 @@ public:
 		{
 			// 풀에 반환되지 않도록 처리되어야하며 로직에 현재 상황이 보고되어야 한다.
 			auto errorObject = GetStatement().GetError();
-			std::cout << errorObject->ToString() << std::endl;
-
 			m_query->GetDao()->HandleOdbcException(errorObject);
 
 			return sqlResultCode;
@@ -735,8 +732,6 @@ public:
 			if (SQL_NO_DATA != sqlResultCode)
 			{
 				auto errorObject = GetStatement().GetError();
-				std::cout << errorObject->ToString() << std::endl;
-
 				m_query->GetDao()->HandleOdbcException(errorObject);
 			}
 			return sqlResultCode;
@@ -771,8 +766,6 @@ public:
 			{
 				return SQL_ERROR;
 			}
-
-			std::cout << e.GetNative()->ToString() << std::endl;
 
 			m_query->GetDao()->HandleOdbcException(e.GetNative());
 		}

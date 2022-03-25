@@ -3,18 +3,6 @@ add_executable(odbc
 	main.cpp
 )
 
-# create static (.a, .lib)
-#add_library(my_lib	STATIC
-#	main.cpp
-#	mmf.cpp
-#)	
-
-# create shared (.so, .dll)
-#add_library(my_lib	SHARED
-#	main.cpp
-#	mmf.cpp
-#)	
-
 target_include_directories(odbc
 PUBLIC
 	${CMAKE_SOURCE_DIR}/include
