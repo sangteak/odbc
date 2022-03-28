@@ -266,52 +266,75 @@ public:
 
 int main() 
 {	
+	// 1. ODBC 매니저 초기화 및 Connection 획득
+	OdbcManager<NoThreadSafeQueue> odbcManager;
+
 	// 사용자 정의 로깅 객체 생성
 	_logging_ptr_t logging = std::make_shared<Logging>();
-
-	// 1. ODBC 매니저 초기화 및 Connection 획득
-	OdbcManager odbcManager;
 	odbcManager.AttachLogging(logging);
-	odbcManager.Init("Driver={ODBC Driver 17 for SQL Server};Server=tcp:172.31.101.38,1433;Database=MFR_GAME;Uid=MFRServerUser;Pwd=1234;language=english;ConnectRetryCount=0;", 10, 100);
-
-	auto connection = odbcManager.GetConnection();
+	odbcManager.Initialize("Driver={ODBC Driver 17 for SQL Server};Server=tcp:172.31.101.38,1433;Database=MFR_GAME;Uid=MFRServerUser;Pwd=1234;language=english;ConnectRetryCount=0;", 10, 100);
 
 	// 2. P_GAME_DAILY_ACHIEVEMENT_R 실행
 	{
-		int64_t usn = 1000121111200000002;
-		std::string datetime = "2022-03-23 12:12:12";
+		do
+		{
+			auto connection = odbcManager.GetConnection();
 
-		auto query = NamedQuery::CreateP_GAME_DAILY_ACHIEVEMENT_R();
-		query->SetParameter(usn, datetime);
+			int64_t usn = 1000121111200000002;
+			std::string datetime = "2022-03-23 12:12:12";
 
-		// 질의 정보를 등록
-		connection->BindQuery(query);
-		connection->Execute();
+			auto query = NamedQuery::CreateP_GAME_DAILY_ACHIEVEMENT_R();
+			query->SetParameter(usn, datetime);
+
+			// 질의 정보를 등록
+			connection->BindQuery(query);
+			auto executeResultCode = connection->Execute();
+			if (SQL_SUCCESS != executeResultCode)
+			{
+				odbcManager.CleanUp(); // 해당 객체에 문제가 있다면 나머지를 모두 날린다.
+				continue;
+			}
+
+			odbcManager.Release(std::move(connection));
+
+			break; // 정상처리되었으므로 종료
+		} while (true);
 	}
 
 	// 3. P_GAME_LoginData_MARS_RU 실행
 	{
-		uint8_t loginMode = 0;
-		int64_t usn = 0;
-		std::string pid = "OTEST2020";
-		int32_t serverID = 1001;
-		std::string serverTime = "2022-03-23 12:12:12";
-		std::string platform = "iOS";
-		std::string country = "Kr";
-		std::string languageCode = "Ko";
+		do
+		{
+			auto connection = odbcManager.GetConnection();
 
-		auto query = NamedQuery::CreateP_GAME_LoginData_MARS_RU();
-		query->SetParameter(loginMode, usn, pid, serverID, serverTime, platform, country, languageCode);
+			uint8_t loginMode = 0;
+			int64_t usn = 0;
+			std::string pid = "OTEST2020";
+			int32_t serverID = 1001;
+			std::string serverTime = "2022-03-23 12:12:12";
+			std::string platform = "iOS";
+			std::string country = "Kr";
+			std::string languageCode = "Ko";
 
-		connection->BindQuery(query);
-		connection->Execute();
+			auto query = NamedQuery::CreateP_GAME_LoginData_MARS_RU();
+			query->SetParameter(loginMode, usn, pid, serverID, serverTime, platform, country, languageCode);
+
+			connection->BindQuery(query);
+			auto executeResultCode = connection->Execute();
+			if (SQL_SUCCESS != executeResultCode)
+			{
+				odbcManager.CleanUp();
+				continue;
+			}
+
+			// 반환
+			odbcManager.Release(std::move(connection));
+			break;
+		} while (true);
 	}
 	
-	// 반환
-	odbcManager.Release(connection);
-
 	// 종료 처리
-	odbcManager.CleanUp();
+	odbcManager.Finalize();
 
 	getchar();
 

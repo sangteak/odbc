@@ -690,7 +690,18 @@ private:
 class Odbc
 {
 public:
+	enum class eState
+	{
+		None = 0,
+		Free,
+		Used
+	};
+
 	Odbc()
+		: m_hDbc(SQL_NULL_HDBC)
+		, m_hEnv(SQL_NULL_HENV)
+		, m_query(nullptr)
+		, m_state(eState::None)
 	{
 	}
 
@@ -699,8 +710,20 @@ public:
 		CleanUp();
 	}
 
+	inline void SetState(eState state) { m_state = state; }
+	inline bool IsFree() { return (m_state == eState::Free); }
+	inline bool IsUsed() { return (m_state == eState::Used); }
+	inline bool IsActive() { return (m_state != eState::None); }
+	
+	bool SetFreeState() 
+	{
+		eState state = eState::Used;
+		return m_state.compare_exchange_strong(state, eState::Free);
+	}
+
 	bool Setup(const char* connectionString, _logging_ptr_t& logging)
 	{
+		
 		m_hEnv = AllocENV();
 		if (m_hEnv == nullptr)
 		{
@@ -729,11 +752,19 @@ public:
 
 		OnLog<ILogging::eLevel::Info>(__FUNCTION__, __LINE__, "Allocate an statement.");
 
-		return m_statement.IsOpen();
+		if (false == m_statement.IsOpen())
+		{
+			return false;
+		}
+
+		return true;
 	}
 
 	void CleanUp()
 	{
+		// 비활성화 상태
+		SetState(eState::None);
+
 		if (true == m_statement.IsOpen())
 		{
 			m_statement.Destroy();
@@ -1015,19 +1046,66 @@ private:
 		}
 	}
 
-	SQLHENV m_hEnv;
-	SQLHDBC m_hDbc;
+	std::atomic<eState> m_state = eState::None;
+
+	SQLHENV m_hEnv = SQL_NULL_HENV;
+	SQLHDBC m_hDbc = SQL_NULL_HDBC;
 	Statement m_statement;
 
-	IQuery* m_query;
+	IQuery* m_query = nullptr;
 	_logging_ptr_t m_logging;
 };
 
-// DB 연결 객체를 관리합니다.(ODBC Pool)
-class OdbcManager
+// 공통 인터페이스
+template <typename Element>
+class IQueue
 {
 public:
-	using _odbc_range_t = std::pair<int32_t, int32_t>;
+	using _element_t = Element;
+
+	virtual bool TryPop(_element_t& task) = 0;
+	virtual void Put(_element_t&& task) = 0;
+};
+
+class NoThreadSafeQueue : public IQueue<std::shared_ptr<Odbc>>
+{
+public:
+	virtual bool TryPop(_element_t& task) override
+	{
+		if (true == m_stack.empty())
+		{
+			return false;
+		}
+
+		task = m_stack.back();
+		m_stack.pop_back();
+
+		return true;
+	}
+
+	virtual void Put(_element_t&& task) override 
+	{
+		m_stack.push_back(std::forward<_element_t>(task));
+	}
+
+private:
+	std::deque<_element_t> m_stack; // 스택으로 사용함.
+};
+
+// DB 연결 객체를 관리합니다.(ODBC Pool)
+// 사용은 선택적으로..
+// 1. TLS로 쓰레드별 관리
+// 2. 멀티 쓰레드 환경에서 사용 가능하도록 처리
+template <typename Queue>
+class OdbcManager
+{
+	static_assert(std::is_base_of_v<IQueue<std::shared_ptr<Odbc>>, Queue>, "A Queue had not inherit a IQueue class.");
+
+public:
+	OdbcManager() 
+		: m_pool(new Queue)
+	{
+	}
 
 	inline bool HasLogging() 
 	{
@@ -1044,57 +1122,180 @@ public:
 		m_logging = nullptr;
 	}
 
-	bool Init(const char* connectionString, int32_t minOdbc, int32_t maxOdbc)
+	bool Initialize(const char* connectionString, int32_t minOdbc, int32_t maxOdbc)
 	{
 		m_connectionString = connectionString;
 
 		if (maxOdbc < minOdbc)
 			return false;
 
-		m_odbcRange = std::make_pair(minOdbc, maxOdbc);
+		m_minConnection = minOdbc;
+		m_maxConnection = maxOdbc;
+
+		m_isRun = true;
 
 		return true;
 	}
 
+	void Finalize()
+	{
+		m_isRun = false;
+
+		CleanUp();
+	}
+
+	// 모든 연결을 종료합니다.
 	void CleanUp()
 	{
 		// 현재 사용하지 않고 있는 것들...종료 처리
+		while (true)
+		{
+			std::shared_ptr<Odbc> odbc;
+			if (false == m_pool->TryPop(odbc))
+			{
+				break;
+			}
+
+			odbc->CleanUp();
+			odbc.reset();
+
+			m_monitor.Cleanup();
+		}
 	}
 
+	// CleanUp 호출되면 nullptr을 반환한다.
 	std::shared_ptr<Odbc> GetConnection()
 	{
-		std::shared_ptr<Odbc> odbc;
-		if (true == m_pool.empty())
+		if (false == m_isRun)
 		{
+			return nullptr;
+		}
+
+		std::shared_ptr<Odbc> odbc;
+		if (false == m_pool->TryPop(odbc))
+		{
+			if (0 < m_maxConnection && m_maxConnection <= m_monitor.GetTotal())
+			{
+				OnLog<ILogging::eLevel::Warning>(__FUNCTION__, __LINE__, "A new connection can not create because over max connection.");
+				return nullptr;
+			}
+
 			odbc.reset(new Odbc);
 
 			if (false == odbc->Setup(m_connectionString.c_str(), m_logging))
 			{
 				return nullptr;
 			}
+
+			m_monitor.Create();
 		}
-		else
-		{
-			odbc = m_pool.front();
-			m_pool.pop_front();
-		}
+
+		// 사용 중으로 변경
+		odbc->SetState(Odbc::eState::Used);
+
+		m_monitor.Allocate();
 
 		return odbc;
 	}
 
-	void Release(std::shared_ptr<Odbc>& odbc)
+	void Release(std::shared_ptr<Odbc>&& odbc)
 	{
-		//m_pool.push(std::move(odbc));
-		m_pool.push_front(std::move(odbc));
+		// Used -> Free로 만 상태 변경이 가능. 
+		// Atomic compare_exchange_strong 처리 
+		if (false == odbc->SetFreeState())
+		{
+			return;
+		}
+
+		if (false == m_isRun)
+		{
+			// 해제한다.
+			odbc->CleanUp();
+			odbc.reset();
+
+			m_monitor.ReleaseAndCleanup();
+			return;
+		}
+
+		m_pool->Put(std::forward<std::shared_ptr<Odbc>>(odbc));
+
+		m_monitor.Release();
 	}
 
 private:
+	template <ILogging::eLevel level, typename... Args>
+	void OnLog(const char* function, int32_t line, std::string_view format, Args... args)
+	{
+		if (nullptr == m_logging)
+		{
+			return;
+		}
+
+		// TODO:: ostream을 상속받아 내부적으로 fmt를 쓰게하자!
+		std::stringstream ss;
+		ss << "[" << NamedLoggingLevel<level>::Name() << "][" << function << "(" << line << ")][" << format << "]";
+
+		std::string message = ss.str();
+
+		switch (level)
+		{
+		case ILogging::eLevel::Trace:
+			m_logging->Trace(message);
+			break;
+		case ILogging::eLevel::Debug:
+			m_logging->Debug(message);
+			break;
+		case ILogging::eLevel::Info:
+			m_logging->Info(message);
+			break;
+		case ILogging::eLevel::Warning:
+			m_logging->Warning(message);
+			break;
+		case ILogging::eLevel::Error:
+			m_logging->Error(message);
+			break;
+		default:
+			break;
+		}
+	}
+
+	// ODBC 객체 사용 현황을 체크하기 위한 모니터 객체
+	class Monitor
+	{
+	public:
+		inline int32_t GetTotal() { return m_total; }
+		inline int32_t GetUsed() { return m_used; }
+		inline int32_t GetFree() { return m_free; }
+
+		void Create() { ++m_total; ++m_free; }
+		void Allocate() { --m_free; ++m_used; }
+		void Release() { ++m_free; --m_used; }
+		void Cleanup() { --m_total; --m_free; }
+		void ReleaseAndCleanup() { Release(); Cleanup(); }
+
+		// 현황을 반환한다. 
+		// 형식) 0 total, 0 free, 0 used
+		std::string ToString() 
+		{
+			return "";
+		}
+
+	private:
+		std::atomic_int32_t m_total = 0;
+		std::atomic_int32_t m_used = 0;
+		std::atomic_int32_t m_free = 0;
+	};
+	
+	Monitor m_monitor;
+
+	std::atomic_bool m_isRun = false;
+
 	std::string m_connectionString;
-	_odbc_range_t m_odbcRange;
+
+	int32_t m_minConnection = 0;
+	int32_t m_maxConnection = 0;
 
 	_logging_ptr_t m_logging;
 
-	// required thread-safe queue
-	//tbb::concurrent_bounded_queue<std::shared_ptr<Odbc>> m_pool;
-	std::deque<std::shared_ptr<Odbc>> m_pool;
+	std::shared_ptr<IQueue<std::shared_ptr<Odbc>>> m_pool;
 };
