@@ -11,6 +11,60 @@
 #pragma comment(lib, "odbc32.lib")
 #pragma comment(lib, "odbccp32.lib")
 
+// TODO:: Net에서 공통적으로 사용될 인터페이스로 대체해야함.
+class ILogging
+{
+public:
+	enum class eLevel
+	{
+		Trace = 0,
+		Debug = 1,
+		Info = 2,
+		Warning = 3,
+		Error = 4
+	};
+
+	virtual void Trace(std::string_view message) = 0;
+	virtual void Debug(std::string_view message) = 0;
+	virtual void Info(std::string_view message) = 0;
+	virtual void Warning(std::string_view message) = 0;
+	virtual void Error(std::string_view message) = 0;
+};
+using _logging_ptr_t = std::shared_ptr<ILogging>;
+
+template <ILogging::eLevel level>
+struct NamedLoggingLevel {};
+
+template <>
+struct NamedLoggingLevel<ILogging::eLevel::Trace> 
+{
+	static const char* Name() { return "Trace"; }
+};
+
+template <>
+struct NamedLoggingLevel<ILogging::eLevel::Debug>
+{
+	static const char* Name() { return "Debug"; }
+};
+
+template <>
+struct NamedLoggingLevel<ILogging::eLevel::Info>
+{
+	static const char* Name() { return "Info"; }
+};
+
+template <>
+struct NamedLoggingLevel<ILogging::eLevel::Warning>
+{
+	static const char* Name() { return "Warn"; }
+};
+
+template <>
+struct NamedLoggingLevel<ILogging::eLevel::Error>
+{
+	static const char* Name() { return "Error"; }
+};
+
 class OdbcError
 {
 public:
@@ -526,7 +580,9 @@ public:
 		SQLSMALLINT nullable;
 		SQLRETURN ret = SQLDescribeCol(m_hStmt, col_num, colname, sizeof(colname), &colnamelen, &coltype, &collen, &decimaldigits, &nullable);
 		if (ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO)
+		{
 			return static_cast<int32_t>(collen);
+		}
 
 		return -1;
 	}
@@ -643,13 +699,15 @@ public:
 		CleanUp();
 	}
 
-	bool Setup(const char* connectionString)
+	bool Setup(const char* connectionString, _logging_ptr_t& logging)
 	{
 		m_hEnv = AllocENV();
 		if (m_hEnv == nullptr)
 		{
 			return false;
 		}
+
+		OnLog<ILogging::eLevel::Info>(__FUNCTION__, __LINE__, "Allocate an environment.");
 
 		m_hDbc = AllocDBC(m_hEnv, connectionString);
 		if (m_hDbc == nullptr)
@@ -663,7 +721,13 @@ public:
 			return false;
 		}
 
+		OnLog<ILogging::eLevel::Info>(__FUNCTION__, __LINE__, "Allocate an DBC.");
+
+		m_logging = logging;
+		
 		m_statement.Open(AllocSTMT(m_hDbc));
+
+		OnLog<ILogging::eLevel::Info>(__FUNCTION__, __LINE__, "Allocate an statement.");
 
 		return m_statement.IsOpen();
 	}
@@ -687,6 +751,8 @@ public:
 			SQLFreeHandle(SQL_HANDLE_ENV, m_hEnv);
 			m_hEnv = SQL_NULL_HANDLE;
 		}
+
+		OnLog<ILogging::eLevel::Info>(__FUNCTION__, __LINE__, "Completed.");
 	}
 
 	inline Statement& GetStatement()
@@ -701,6 +767,8 @@ public:
 		// 바인딩 합니다.
 		m_query->Build(&GetStatement());
 
+		OnLog<ILogging::eLevel::Info>(__FUNCTION__, __LINE__, m_query->GetScript());
+		
 		return true;
 	}
 
@@ -712,6 +780,8 @@ public:
 			auto errorObject = GetStatement().GetError();
 			m_query->GetDao()->HandleOdbcException(errorObject);
 
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, errorObject->ToString());
+
 			return sqlResultCode;
 		}
 
@@ -721,6 +791,8 @@ public:
 			// 풀에 반환되지 않도록 처리되어야하며 로직에 현재 상황이 보고되어야 한다.
 			auto errorObject = GetStatement().GetError();
 			m_query->GetDao()->HandleOdbcException(errorObject);
+
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, errorObject->ToString());
 
 			return sqlResultCode;
 		}
@@ -733,6 +805,8 @@ public:
 			{
 				auto errorObject = GetStatement().GetError();
 				m_query->GetDao()->HandleOdbcException(errorObject);
+
+				OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, errorObject->ToString());
 			}
 			return sqlResultCode;
 		}
@@ -768,11 +842,23 @@ public:
 			}
 
 			m_query->GetDao()->HandleOdbcException(e.GetNative());
+
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, e.GetNative()->ToString());
 		}
 
 		GetStatement().Close();
 
+		OnLog<ILogging::eLevel::Info>(__FUNCTION__, __LINE__, "Completed.");
+
 		return SQL_SUCCESS;
+	}
+
+	_odbc_error_ptr_t GetDbcError()
+	{
+		auto odbcError = std::make_shared<OdbcError>(SQL_HANDLE_DBC, m_hDbc);
+		odbcError->Parse();
+
+		return odbcError;
 	}
 
 private:
@@ -788,6 +874,7 @@ private:
 		retcode = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &hEnv);
 		if (!(retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO))
 		{
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, "Failed to allocate an environment.");
 			return nullptr;
 		}
 
@@ -797,6 +884,7 @@ private:
 		retcode = SQLSetEnvAttr(hEnv, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, SQL_IS_INTEGER);
 		if (!(retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO))
 		{
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, "Failed to register an attribute that is SQL_ATTR_ODBC_VERSION.");
 			SQLFreeHandle(SQL_HANDLE_STMT, hEnv);
 			return nullptr;
 		}
@@ -813,6 +901,7 @@ private:
 		retcode = SQLAllocHandle(SQL_HANDLE_DBC, hEnv, &hDbc);
 		if (!(retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO))
 		{
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, "Failed to allocate a DBC.");
 			return nullptr;
 		}
 
@@ -820,6 +909,7 @@ private:
 		retcode = SQLSetConnectAttr(hDbc, SQL_LOGIN_TIMEOUT, reinterpret_cast<SQLPOINTER>(1), 0);
 		if (!(retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO))
 		{
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, "Failed to set an attribute that is SQL_LOGIN_TIMEOUT.");
 			SQLFreeHandle(SQL_HANDLE_STMT, hDbc);
 			return nullptr;
 		}
@@ -827,6 +917,7 @@ private:
 		retcode = SQLSetConnectAttr(hDbc, SQL_ATTR_CONNECTION_TIMEOUT, reinterpret_cast<SQLPOINTER>(1), 0);
 		if (!(retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO))
 		{
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, "Failed to set an attribute that is SQL_ATTR_CONNECTION_TIMEOUT.");
 			SQLFreeHandle(SQL_HANDLE_STMT, hDbc);
 			return nullptr;
 		}
@@ -834,6 +925,8 @@ private:
 		retcode = SQLSetConnectAttr(hDbc, SQL_ATTR_AUTOCOMMIT, reinterpret_cast<SQLPOINTER>(SQL_AUTOCOMMIT_ON), SQL_IS_UINTEGER);
 		if (!(retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO))
 		{
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, "Failed to set an attribute that is SQL_ATTR_AUTOCOMMIT.");
+
 			SQLFreeHandle(SQL_HANDLE_STMT, hDbc);
 			return nullptr;
 		}
@@ -841,6 +934,8 @@ private:
 		retcode = SQLSetConnectAttr(hDbc, SQL_COPT_SS_MARS_ENABLED, reinterpret_cast<SQLPOINTER>(SQL_MARS_ENABLED_YES), SQL_IS_UINTEGER);
 		if (!(retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO))
 		{
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, "Failed to set an attribute that is SQL_COPT_SS_MARS_ENABLED.");
+
 			SQLFreeHandle(SQL_HANDLE_STMT, hDbc);
 			return nullptr;
 		}
@@ -862,10 +957,8 @@ private:
 		// 		retcode = SQLGetConnectAttr(hDbc, SQL_COPT_SS_CONNECT_RETRY_COUNT, &retry_count, SQL_IS_INTEGER, NULL);
 		// 		retcode = SQLGetConnectAttr(hDbc, SQL_COPT_SS_CONNECT_RETRY_INTERVAL, &retry_count, SQL_IS_INTEGER, NULL);
 
-		std::string error;
-		std::string sqlState;
-		long out_native_error = 0L;
-		//GetErrorString(SQL_HANDLE_DBC, hDbc, sqlState, error, out_native_error);
+		auto dbcError = GetDbcError();
+		OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, dbcError->ToString());
 
 		SQLFreeHandle(SQL_HANDLE_STMT, hDbc);
 		return nullptr;
@@ -880,10 +973,46 @@ private:
 		retcode = SQLAllocHandle(SQL_HANDLE_STMT, hDbc, &hStmt);
 		if (!(retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO))
 		{
+			OnLog<ILogging::eLevel::Error>(__FUNCTION__, __LINE__, "Failed to allocate a handle that is SQL_HANDLE_STMT.");
 			return nullptr;
 		}
 
 		return hStmt;
+	}
+
+	template <ILogging::eLevel level, typename... Args>
+	void OnLog(const char* function, int32_t line, std::string_view format, Args... args)
+	{
+		if (nullptr == m_logging)
+		{
+			return;
+		}
+
+		std::stringstream ss;
+		ss << "[" << NamedLoggingLevel<level>::Name() << "][" << function << "(" << line << ")][" << format << "]";
+		
+		std::string message = ss.str();
+
+		switch (level)
+		{
+		case ILogging::eLevel::Trace:
+			m_logging->Trace(message);
+			break;
+		case ILogging::eLevel::Debug:
+			m_logging->Debug(message);
+			break;
+		case ILogging::eLevel::Info:
+			m_logging->Info(message);
+			break;
+		case ILogging::eLevel::Warning:
+			m_logging->Warning(message);
+			break;
+		case ILogging::eLevel::Error:
+			m_logging->Error(message);
+			break;
+		default:
+			break;
+		}
 	}
 
 	SQLHENV m_hEnv;
@@ -891,6 +1020,7 @@ private:
 	Statement m_statement;
 
 	IQuery* m_query;
+	_logging_ptr_t m_logging;
 };
 
 // DB 연결 객체를 관리합니다.(ODBC Pool)
@@ -898,6 +1028,21 @@ class OdbcManager
 {
 public:
 	using _odbc_range_t = std::pair<int32_t, int32_t>;
+
+	inline bool HasLogging() 
+	{
+		return (nullptr != m_logging);
+	}
+
+	void AttachLogging(_logging_ptr_t& logging)
+	{
+		m_logging = logging;
+	}
+
+	void DetachLogging()
+	{
+		m_logging = nullptr;
+	}
 
 	bool Init(const char* connectionString, int32_t minOdbc, int32_t maxOdbc)
 	{
@@ -923,7 +1068,7 @@ public:
 		{
 			odbc.reset(new Odbc);
 
-			if (false == odbc->Setup(m_connectionString.c_str()))
+			if (false == odbc->Setup(m_connectionString.c_str(), m_logging))
 			{
 				return nullptr;
 			}
@@ -946,6 +1091,8 @@ public:
 private:
 	std::string m_connectionString;
 	_odbc_range_t m_odbcRange;
+
+	_logging_ptr_t m_logging;
 
 	// required thread-safe queue
 	//tbb::concurrent_bounded_queue<std::shared_ptr<Odbc>> m_pool;

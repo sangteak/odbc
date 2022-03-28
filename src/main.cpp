@@ -4,10 +4,39 @@
 #include <cstdint>
 #include <vector>
 
-// 여러 Row 읽기 처리
+class Logging : public ILogging
+{
+public:
+	virtual void Trace(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+
+	virtual void Debug(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+
+	virtual void Info(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+
+	virtual void Warning(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+
+	virtual void Error(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+};
+
 class P_GAME_DAILY_ACHIEVEMENT_R : public IDataAccessObject
 {
 public:
+	// 데이터 구조체 선언
 	struct element
 	{
 		int32_t type;
@@ -15,10 +44,13 @@ public:
 		std::string expiretime;
 	};
 
+	// Query 실행 중 에러 발생 시 호출
 	virtual void HandleOdbcException(_odbc_error_ptr_t& err) override
 	{
 	}
 
+	// RecordSet 데이터 파싱
+	// 1개 이상의 row를 받았을 경우 처리
 	virtual bool Parse(Statement* statement) override
 	{
 		std::string expireTime;
@@ -38,6 +70,8 @@ public:
 		return true;
 	}
 
+	// 모든 레코드셋 Parse가 끝난 후 호출되는 콜백
+	// 데이터 로드가 끝난 상태이므로 필요한 후 처리를 진행
 	virtual void Process() override 
 	{
 		std::cout << __FUNCTION__ << std::endl;
@@ -203,8 +237,10 @@ private:
 class NamedQuery
 {
 public:
+	// Query 선언 <- Query<P_GAME_DAILY_ACHIEVEMENT_R, int64_t, std::string>
 	static Query<P_GAME_DAILY_ACHIEVEMENT_R, int64_t, std::string>* CreateP_GAME_DAILY_ACHIEVEMENT_R()
 	{
+		// 객체 생성 시 Query 작성
 		return new Query<P_GAME_DAILY_ACHIEVEMENT_R, int64_t, std::string>(
 			"{ call P_GAME_DAILY_ACHIEVEMENT_R(?, ?) }"
 			);
@@ -230,9 +266,13 @@ public:
 
 int main() 
 {	
-	// 1. ODBC 매니저 초기화
+	// 사용자 정의 로깅 객체 생성
+	_logging_ptr_t logging = std::make_shared<Logging>();
+
+	// 1. ODBC 매니저 초기화 및 Connection 획득
 	OdbcManager odbcManager;
-	odbcManager.Init("Driver={ODBC Driver 17 for SQL Server};Server=tcp:[ip],[port];Database=[dbtabase name];Uid=[id];Pwd=[pwd];language=english;ConnectRetryCount=0;", 10, 100);
+	odbcManager.AttachLogging(logging);
+	odbcManager.Init("Driver={ODBC Driver 17 for SQL Server};Server=tcp:172.31.101.38,1433;Database=MFR_GAME;Uid=MFRServerUser;Pwd=1234;language=english;ConnectRetryCount=0;", 10, 100);
 
 	auto connection = odbcManager.GetConnection();
 
@@ -272,6 +312,8 @@ int main()
 
 	// 종료 처리
 	odbcManager.CleanUp();
+
+	getchar();
 
 	return 0;
 }
