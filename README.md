@@ -83,12 +83,47 @@ public:
 };
 
 ```
-3. 쿼리 실행
+3. 로깅 객체 생성
+```cpp
+class Logging : public ILogging
+{
+public:
+	virtual void Trace(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+
+	virtual void Debug(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+
+	virtual void Info(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+
+	virtual void Warning(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+
+	virtual void Error(std::string_view message) override
+	{
+		std::cout << message << std::endl;
+	}
+};
+```
+
+4. 쿼리 실행
 ```cpp
 int main() 
 {	
 	// 1. ODBC 매니저 초기화 및 Connection 획득
 	OdbcManager odbcManager;
+	// 사용자 정의 로깅 객체 생성
+	_logging_ptr_t logging = std::make_shared<Logging>();
+	odbcManager.AttachLogging(logging);
 	odbcManager.Init("Driver={ODBC Driver 17 for SQL Server};Server=tcp:172.31.101.38,1433;Database=MFR_GAME;Uid=MFRServerUser;Pwd=1234;language=english;ConnectRetryCount=0;", 10, 100);
 
 	auto connection = odbcManager.GetConnection();
