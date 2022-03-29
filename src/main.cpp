@@ -238,10 +238,11 @@ class NamedQuery
 {
 public:
 	// Query 선언 <- Query<P_GAME_DAILY_ACHIEVEMENT_R, int64_t, std::string>
-	static Query<P_GAME_DAILY_ACHIEVEMENT_R, int64_t, std::string>* CreateP_GAME_DAILY_ACHIEVEMENT_R()
+	using _query_P_GAME_DAILY_ACHIEVEMENT_R = std::shared_ptr<Query<P_GAME_DAILY_ACHIEVEMENT_R, int64_t, std::string>>;
+	static _query_P_GAME_DAILY_ACHIEVEMENT_R CreateP_GAME_DAILY_ACHIEVEMENT_R()
 	{
 		// 객체 생성 시 Query 작성
-		return new Query<P_GAME_DAILY_ACHIEVEMENT_R, int64_t, std::string>(
+		return std::make_shared<Query<P_GAME_DAILY_ACHIEVEMENT_R, int64_t, std::string>>(
 			"{ call P_GAME_DAILY_ACHIEVEMENT_R(?, ?) }"
 			);
 	}
@@ -264,28 +265,178 @@ public:
 	}
 };
 
+#include <queue>
+
+class TlsWorkerThread
+{
+public:
+	TlsWorkerThread(OdbcConfiguration& config) 
+	{
+		m_odbcPoolTls.SetConfiguration(config);
+	}
+
+	void Run() 
+	{
+		for (int32_t i = 0; i < 1; ++i)
+		{
+			m_threadGroup.emplace_back(
+				[this]()
+				{
+					auto odbcPool = m_odbcPoolTls.Create();
+					if (false == odbcPool->HasLogging())
+					{
+						odbcPool->AttachLogging(m_logging);
+					}
+
+					/*
+					/////////////////////////////////////////////////////////////
+					// Queue를 통해 전달된 Task
+					int64_t usn = 1000121111200000002;
+					std::string datetime = "2022-03-23 12:12:12";
+
+					auto query = NamedQuery::CreateP_GAME_DAILY_ACHIEVEMENT_R();
+					query->SetParameter(usn, datetime);
+					/////////////////////////////////////////////////////////////
+					*/
+
+					while (true)
+					{
+						std::shared_ptr<IQuery> query;
+						if (false == TryPop(query))
+						{
+							std::this_thread::sleep_for(std::chrono::milliseconds(10));
+							continue;
+						}
+
+						if (nullptr == query)
+						{
+							break;
+						}
+
+						do
+						{
+							auto connection = odbcPool->GetConnection();
+							if (nullptr == connection)
+							{
+								// 네트웍 또는 장비 이슈로 인해 연결을 할수 없는 상태라면?? 
+
+								break;
+							}
+
+							// 질의 정보를 등록
+							connection->BindQuery(query.get());
+							auto executeResultCode = connection->Execute();
+							if (SQL_SUCCESS != executeResultCode)
+							{
+								odbcPool->CleanUp(); // 해당 객체에 문제가 있다면 나머지를 모두 날린다.
+								continue;
+							}
+
+							odbcPool->Release(std::move(connection));
+
+							break; // 정상처리되었으므로 종료
+						} while (true);
+
+						std::this_thread::sleep_for(std::chrono::seconds(1));
+					}
+
+					m_odbcPoolTls.Destroy();
+				}
+			);
+		}
+	}
+
+	void Put(std::shared_ptr<IQuery> task)
+	{
+		std::unique_lock<std::mutex> lock(m_mutex);
+		m_queue.push(task);
+	}
+
+	bool TryPop(std::shared_ptr<IQuery>& task)
+	{
+		std::unique_lock<std::mutex> lock(m_mutex);
+		if (true == m_queue.empty())
+		{
+			return false;
+		}
+
+		task = m_queue.front();
+		m_queue.pop();
+
+		return true;
+	}
+
+	void Stop()
+	{
+		Put(nullptr);
+
+		for (auto& t : m_threadGroup)
+		{
+			t.join();
+		}
+	}
+
+private:
+	OdbcPoolTls m_odbcPoolTls;
+
+	_logging_ptr_t m_logging = std::make_shared<Logging>();
+
+	std::mutex m_mutex;
+	std::queue<std::shared_ptr<IQuery>> m_queue;
+
+	std::vector<std::thread> m_threadGroup;
+};
+
 int main() 
-{	
+{
+	OdbcConfiguration config;
+	config.connectionString = "Driver={ODBC Driver 17 for SQL Server};Server=tcp:172.31.101.38,1433;Database=MFR_GAME;Uid=MFRServerUser;Pwd=1234;language=english;ConnectRetryCount=0;";
+	config.maxOdbcCount = 10;
+
+	TlsWorkerThread twh(config);
+	
+	for (int32_t i = 0; i < 10; ++i)
+	{
+		int64_t usn = 1000121111200000002;
+		std::string datetime = "2022-03-23 12:12:12";
+
+		auto query = NamedQuery::CreateP_GAME_DAILY_ACHIEVEMENT_R();
+		query->SetParameter(
+			usn, 
+			datetime
+		);
+
+		twh.Put(query);
+	}
+	
+	twh.Run();
+
+	/*
 	// 1. ODBC 매니저 초기화 및 Connection 획득
-	OdbcManager<NoThreadSafeQueue> odbcManager;
+	OdbcPool<NonThreadSafeQueue> odbcManager;
 
 	// 사용자 정의 로깅 객체 생성
 	_logging_ptr_t logging = std::make_shared<Logging>();
 	odbcManager.AttachLogging(logging);
-	odbcManager.Initialize("Driver={ODBC Driver 17 for SQL Server};Server=tcp:172.31.101.38,1433;Database=MFR_GAME;Uid=MFRServerUser;Pwd=1234;language=english;ConnectRetryCount=0;", 10, 100);
+	odbcManager.Initialize("Driver={ODBC Driver 17 for SQL Server};Server=tcp:172.31.101.38,1433;Database=MFR_GAME;Uid=MFRServerUser;Pwd=1234;language=english;ConnectRetryCount=0;", 100);
 
 	// 2. P_GAME_DAILY_ACHIEVEMENT_R 실행
 	{
 		do
 		{
-			auto connection = odbcManager.GetConnection();
-
 			int64_t usn = 1000121111200000002;
 			std::string datetime = "2022-03-23 12:12:12";
 
 			auto query = NamedQuery::CreateP_GAME_DAILY_ACHIEVEMENT_R();
 			query->SetParameter(usn, datetime);
 
+			auto connection = odbcManager.GetConnection();
+			if (nullptr == connection)
+			{
+				// 네트웍 또는 장비 이슈로 인해 연결을 할수 없는 상태라면?? 
+
+				break;
+			}
 			// 질의 정보를 등록
 			connection->BindQuery(query);
 			auto executeResultCode = connection->Execute();
@@ -305,8 +456,6 @@ int main()
 	{
 		do
 		{
-			auto connection = odbcManager.GetConnection();
-
 			uint8_t loginMode = 0;
 			int64_t usn = 0;
 			std::string pid = "OTEST2020";
@@ -319,11 +468,12 @@ int main()
 			auto query = NamedQuery::CreateP_GAME_LoginData_MARS_RU();
 			query->SetParameter(loginMode, usn, pid, serverID, serverTime, platform, country, languageCode);
 
+			auto connection = odbcManager.GetConnection();
 			connection->BindQuery(query);
 			auto executeResultCode = connection->Execute();
 			if (SQL_SUCCESS != executeResultCode)
 			{
-				odbcManager.CleanUp();
+				odbcManager.CleanUp(); // Thread Local로 사용될 경우(Single Thread)
 				continue;
 			}
 
@@ -332,11 +482,14 @@ int main()
 			break;
 		} while (true);
 	}
-	
+
 	// 종료 처리
 	odbcManager.Finalize();
+	*/
 
 	getchar();
+
+	twh.Stop();
 
 	return 0;
 }

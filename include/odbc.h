@@ -1,8 +1,11 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <deque>
 #include <memory>
+#include <shared_mutex>
+#include <thread>
 #include <sstream>
 #include <sql.h>
 #include <sqlext.h>
@@ -1067,7 +1070,7 @@ public:
 	virtual void Put(_element_t&& task) = 0;
 };
 
-class NoThreadSafeQueue : public IQueue<std::shared_ptr<Odbc>>
+class NonThreadSafeQueue : public IQueue<std::shared_ptr<Odbc>>
 {
 public:
 	virtual bool TryPop(_element_t& task) override
@@ -1092,17 +1095,23 @@ private:
 	std::deque<_element_t> m_stack; // 스택으로 사용함.
 };
 
+struct OdbcConfiguration
+{
+	std::string connectionString;
+	int32_t maxOdbcCount = 0;
+};
+
 // DB 연결 객체를 관리합니다.(ODBC Pool)
 // 사용은 선택적으로..
 // 1. TLS로 쓰레드별 관리
 // 2. 멀티 쓰레드 환경에서 사용 가능하도록 처리
 template <typename Queue>
-class OdbcManager
+class OdbcPool
 {
 	static_assert(std::is_base_of_v<IQueue<std::shared_ptr<Odbc>>, Queue>, "A Queue had not inherit a IQueue class.");
 
 public:
-	OdbcManager() 
+	OdbcPool() 
 		: m_pool(new Queue)
 	{
 	}
@@ -1122,15 +1131,9 @@ public:
 		m_logging = nullptr;
 	}
 
-	bool Initialize(const char* connectionString, int32_t minOdbc, int32_t maxOdbc)
+	bool Initialize(const OdbcConfiguration& configuration)
 	{
-		m_connectionString = connectionString;
-
-		if (maxOdbc < minOdbc)
-			return false;
-
-		m_minConnection = minOdbc;
-		m_maxConnection = maxOdbc;
+		m_configuration = configuration;
 
 		m_isRun = true;
 
@@ -1174,7 +1177,7 @@ public:
 		std::shared_ptr<Odbc> odbc;
 		if (false == m_pool->TryPop(odbc))
 		{
-			if (0 < m_maxConnection && m_maxConnection <= m_monitor.GetTotal())
+			if (0 < m_configuration.maxOdbcCount && m_configuration.maxOdbcCount <= m_monitor.GetTotal())
 			{
 				OnLog<ILogging::eLevel::Warning>(__FUNCTION__, __LINE__, "A new connection can not create because over max connection.");
 				return nullptr;
@@ -1182,7 +1185,7 @@ public:
 
 			odbc.reset(new Odbc);
 
-			if (false == odbc->Setup(m_connectionString.c_str(), m_logging))
+			if (false == odbc->Setup(m_configuration.connectionString.c_str(), m_logging))
 			{
 				return nullptr;
 			}
@@ -1259,6 +1262,12 @@ private:
 		}
 	}
 
+	// 쓰레드 마다 Manager를 가진다면..?? 
+	// 누가 취합하지???
+	// 이 경우 전체 연결 수와 사용 현황을 모니터링 할 수 있는 기능이 필요하다.
+	// 결국 모니터링 메트릭에 변화가 생길 경우 이를 노티 받아야한다.
+
+
 	// ODBC 객체 사용 현황을 체크하기 위한 모니터 객체
 	class Monitor
 	{
@@ -1290,12 +1299,82 @@ private:
 
 	std::atomic_bool m_isRun = false;
 
-	std::string m_connectionString;
-
-	int32_t m_minConnection = 0;
-	int32_t m_maxConnection = 0;
+	OdbcConfiguration m_configuration;
 
 	_logging_ptr_t m_logging;
 
 	std::shared_ptr<IQueue<std::shared_ptr<Odbc>>> m_pool;
+};
+
+// 쓰레드별 OdbcPool을 관리하기 위한 객체
+class OdbcPoolTls
+{
+public:
+	using _key_t = std::thread::id;
+	using _value_t = std::shared_ptr<OdbcPool<NonThreadSafeQueue>>;
+	using _container_t = std::map<_key_t, _value_t>;
+
+	void SetConfiguration(const OdbcConfiguration& configuration)
+	{
+		m_configuration = configuration;
+	}
+
+	_value_t Create()
+	{
+		std::unique_lock<std::shared_mutex> lock(m_mutex);
+
+		auto itr = m_container.find(std::this_thread::get_id());
+		if (m_container.end() != itr)
+		{
+			return itr->second;
+		}
+
+		auto obj = std::make_shared<OdbcPool<NonThreadSafeQueue>>();
+		obj->Initialize(m_configuration);
+
+		m_container.emplace(std::this_thread::get_id(), obj);
+
+		return obj;
+	}
+
+	_value_t Lookup()
+	{
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
+
+		auto itr = m_container.find(std::this_thread::get_id());
+		if (m_container.end() == itr)
+		{
+			return nullptr;
+		}
+
+		return itr->second;
+	}
+
+	void Destroy()
+	{
+		std::unique_lock<std::shared_mutex> lock(m_mutex);
+
+		auto itr = m_container.find(std::this_thread::get_id());
+		if (m_container.end() != itr)
+		{
+			itr->second->Finalize();
+			m_container.erase(itr);
+		}
+	}
+
+	template <typename Func>
+	void Traverse(Func&& func)
+	{
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
+
+		for (const auto& [key, value] : m_container)
+		{
+			func(key, value);
+		}
+	}
+
+private:
+	std::shared_mutex m_mutex;
+	OdbcConfiguration m_configuration;
+	_container_t m_container;
 };
